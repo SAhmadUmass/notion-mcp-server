@@ -432,8 +432,9 @@ server.tool("extract-url-metadata", {
     summaryPropertyName: z.string().optional(),
     batchSize: z.number().default(5),
     limit: z.number().default(50),
-    generateSummary: z.boolean().default(true)
-}, async ({ databaseId, urlPropertyName, publicationPropertyName, authorPropertyName, datePropertyName, summaryPropertyName, batchSize, limit, generateSummary }) => {
+    generateSummary: z.boolean().default(true),
+    silentErrors: z.boolean().default(true)
+}, async ({ databaseId, urlPropertyName, publicationPropertyName, authorPropertyName, datePropertyName, summaryPropertyName, batchSize, limit, generateSummary, silentErrors }) => {
     try {
         // First retrieve database to get property types
         const databaseInfo = await notion.databases.retrieve({
@@ -505,71 +506,114 @@ server.tool("extract-url-metadata", {
                     const properties = {};
                     // Handle publication based on property type
                     if (metadata.publication && publicationPropertyType) {
-                        if (publicationPropertyType === 'select') {
-                            properties[publicationProperty] = createSelectProperty(metadata.publication);
+                        try {
+                            if (publicationPropertyType === 'select') {
+                                properties[publicationProperty] = createSelectProperty(metadata.publication);
+                            }
+                            else if (publicationPropertyType === 'rich_text') {
+                                properties[publicationProperty] = createRichTextProperty(metadata.publication);
+                            }
+                            else if (publicationPropertyType === 'title') {
+                                properties[publicationProperty] = createTitleProperty(metadata.publication);
+                            }
                         }
-                        else if (publicationPropertyType === 'rich_text') {
-                            properties[publicationProperty] = createRichTextProperty(metadata.publication);
-                        }
-                        else if (publicationPropertyType === 'title') {
-                            properties[publicationProperty] = createTitleProperty(metadata.publication);
+                        catch (err) {
+                            if (!silentErrors) {
+                                return `Row ${page.id}: Error setting ${publicationProperty} property: ${err.message}`;
+                            }
                         }
                     }
                     // Handle author based on property type
                     if (metadata.author && authorPropertyType) {
-                        if (authorPropertyType === 'multi_select') {
-                            properties[authorProperty] = createMultiSelectProperty(parseAuthors(metadata.author));
+                        try {
+                            if (authorPropertyType === 'multi_select') {
+                                properties[authorProperty] = createMultiSelectProperty(parseAuthors(metadata.author));
+                            }
+                            else if (authorPropertyType === 'select') {
+                                properties[authorProperty] = createSelectProperty(metadata.author);
+                            }
+                            else if (authorPropertyType === 'rich_text') {
+                                properties[authorProperty] = createRichTextProperty(metadata.author);
+                            }
                         }
-                        else if (authorPropertyType === 'select') {
-                            properties[authorProperty] = createSelectProperty(metadata.author);
-                        }
-                        else if (authorPropertyType === 'rich_text') {
-                            properties[authorProperty] = createRichTextProperty(metadata.author);
+                        catch (err) {
+                            if (!silentErrors) {
+                                return `Row ${page.id}: Error setting ${authorProperty} property: ${err.message}`;
+                            }
                         }
                     }
                     // Handle date based on property type
                     if (metadata.date && datePropertyType === 'date') {
-                        properties[dateProperty] = createDateProperty(metadata.date);
+                        try {
+                            properties[dateProperty] = createDateProperty(metadata.date);
+                        }
+                        catch (err) {
+                            if (!silentErrors) {
+                                return `Row ${page.id}: Error setting ${dateProperty} property: ${err.message}`;
+                            }
+                        }
                     }
                     // Get content for page update and summary generation
                     let content = metadata.content || '';
                     let summary = '';
                     // Generate summary using extracted content
                     if (content && generateSummary && summaryPropertyType) {
-                        // For now, use a simple summarization method
-                        summary = createSimpleSummary(content);
-                        // Add summary to properties based on property type
-                        if (summaryPropertyType === 'rich_text') {
-                            properties[summaryProperty] = createRichTextProperty(summary);
+                        try {
+                            // For now, use a simple summarization method
+                            summary = createSimpleSummary(content);
+                            // Add summary to properties based on property type
+                            if (summaryPropertyType === 'rich_text') {
+                                properties[summaryProperty] = createRichTextProperty(summary);
+                            }
+                            else if (summaryPropertyType === 'select') {
+                                properties[summaryProperty] = createSelectProperty(summary);
+                            }
+                            else if (summaryPropertyType === 'multi_select') {
+                                properties[summaryProperty] = createMultiSelectProperty([summary]);
+                            }
                         }
-                        else if (summaryPropertyType === 'select') {
-                            properties[summaryProperty] = createSelectProperty(summary);
-                        }
-                        else if (summaryPropertyType === 'multi_select') {
-                            properties[summaryProperty] = createMultiSelectProperty([summary]);
+                        catch (err) {
+                            if (!silentErrors) {
+                                return `Row ${page.id}: Error setting ${summaryProperty} property: ${err.message}`;
+                            }
                         }
                     }
-                    // Update the page properties
+                    // Update the page properties if we have any to update
                     if (Object.keys(properties).length > 0) {
-                        await notion.pages.update({
-                            page_id: page.id,
-                            properties: properties
-                        });
+                        try {
+                            await notion.pages.update({
+                                page_id: page.id,
+                                properties: properties
+                            });
+                        }
+                        catch (err) {
+                            if (!silentErrors) {
+                                return `Row ${page.id}: Error updating properties: ${err.message}`;
+                            }
+                            // If we fail to update properties, we'll still try to update content
+                        }
                     }
                     // Update the page content if we have content and it's not already in the page
                     if (content) {
-                        // Get existing blocks
-                        const blocks = await notion.blocks.children.list({
-                            block_id: page.id
-                        });
-                        // Only update if there are no blocks or fewer than 3 (assuming just a title)
-                        if (blocks.results.length < 3) {
-                            // Create content blocks (paragraphs)
-                            const contentBlocks = createContentBlocks(content);
-                            await notion.blocks.children.append({
-                                block_id: page.id,
-                                children: contentBlocks
+                        try {
+                            // Get existing blocks
+                            const blocks = await notion.blocks.children.list({
+                                block_id: page.id
                             });
+                            // Only update if there are no blocks or fewer than 3 (assuming just a title)
+                            if (blocks.results.length < 3) {
+                                // Create content blocks (paragraphs)
+                                const contentBlocks = createContentBlocks(content);
+                                await notion.blocks.children.append({
+                                    block_id: page.id,
+                                    children: contentBlocks
+                                });
+                            }
+                        }
+                        catch (err) {
+                            if (!silentErrors) {
+                                return `Row ${page.id}: Error updating content: ${err.message}`;
+                            }
                         }
                     }
                     successCount++;
@@ -577,7 +621,7 @@ server.tool("extract-url-metadata", {
                 }
                 catch (error) {
                     failureCount++;
-                    return `Row ${page.id}: Failed to extract metadata - ${error.message}`;
+                    return `Row ${page.id}: Failed to extract metadata - ${silentErrors ? 'Error occurred' : error.message}`;
                 }
             });
             // Wait for all pages in the batch to be processed
@@ -821,7 +865,13 @@ function extractAuthor($) {
     if (jsonLdScripts.length) {
         jsonLdScripts.each((i, el) => {
             try {
-                const jsonLd = JSON.parse($(el).html() || '');
+                // Safely parse the JSON, with error handling
+                const scriptContent = $(el).html() || '';
+                // Clean up common issues in JSON-LD that cause parsing errors
+                const cleanedJson = sanitizeJsonString(scriptContent);
+                if (!cleanedJson)
+                    return; // Skip if we couldn't clean it
+                const jsonLd = JSON.parse(cleanedJson);
                 // Handle various JSON-LD formats
                 const possibleAuthor = extractAuthorFromJsonLd(jsonLd);
                 if (possibleAuthor) {
@@ -833,47 +883,56 @@ function extractAuthor($) {
                 }
             }
             catch (e) {
-                // Ignore JSON parsing errors
+                // Silently ignore JSON parsing errors
             }
         });
     }
     return author;
 }
-// Helper function to extract author from JSON-LD
-function extractAuthorFromJsonLd(jsonLd) {
-    // Handle array of JSON-LD objects
-    if (Array.isArray(jsonLd)) {
-        for (const item of jsonLd) {
-            const author = extractAuthorFromJsonLd(item);
-            if (author)
-                return author;
+// Helper function to sanitize JSON strings before parsing
+function sanitizeJsonString(jsonString) {
+    try {
+        // Remove potential HTML comments
+        let cleaned = jsonString.replace(/<!--[\s\S]*?-->/g, '');
+        // Remove trailing commas in objects and arrays
+        cleaned = cleaned.replace(/,\s*([\]}])/g, '$1');
+        // Fix unquoted property names
+        cleaned = cleaned.replace(/([{,]\s*)([a-zA-Z0-9_$]+)\s*:/g, '$1"$2":');
+        // Handle single quotes instead of double quotes for strings
+        // This is a simplistic approach and may not handle all cases correctly
+        let inString = false;
+        let inSingleQuoteString = false;
+        let result = '';
+        for (let i = 0; i < cleaned.length; i++) {
+            const char = cleaned[i];
+            const prevChar = i > 0 ? cleaned[i - 1] : '';
+            if (char === '"' && prevChar !== '\\') {
+                inString = !inString;
+                result += char;
+            }
+            else if (char === "'" && prevChar !== '\\' && !inString) {
+                inSingleQuoteString = !inSingleQuoteString;
+                result += '"'; // Replace single quote with double quote
+            }
+            else if (inSingleQuoteString && char === "'" && prevChar === '\\') {
+                // Handle escaped single quote inside a single-quoted string
+                result = result.slice(0, -1) + "\\'"; // Keep the escape and single quote
+            }
+            else {
+                result += char;
+            }
         }
-        return '';
-    }
-    // Check for author in different formats
-    if (typeof jsonLd?.author === 'string') {
-        return jsonLd.author;
-    }
-    if (jsonLd?.author?.name) {
-        return jsonLd.author.name;
-    }
-    // Handle array of authors
-    if (Array.isArray(jsonLd?.author) && jsonLd.author.length > 0) {
-        if (typeof jsonLd.author[0] === 'string') {
-            return jsonLd.author[0];
+        // Quick validation check - does it at least start with { or [ and end with } or ]?
+        const trimmed = result.trim();
+        if ((trimmed.startsWith('{') && trimmed.endsWith('}')) ||
+            (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+            return trimmed;
         }
-        if (jsonLd.author[0]?.name) {
-            return jsonLd.author[0].name;
-        }
+        return null; // Signal that we couldn't clean it properly
     }
-    // Check for creator
-    if (typeof jsonLd?.creator === 'string') {
-        return jsonLd.creator;
+    catch (e) {
+        return null; // Return null if any error occurs during cleaning
     }
-    if (jsonLd?.creator?.name) {
-        return jsonLd.creator.name;
-    }
-    return '';
 }
 // Helper function to extract date
 function extractDate($) {
@@ -886,7 +945,12 @@ function extractDate($) {
     if (jsonLdScripts.length) {
         jsonLdScripts.each((i, el) => {
             try {
-                const jsonLd = JSON.parse($(el).html() || '');
+                // Safely parse the JSON, with error handling
+                const scriptContent = $(el).html() || '';
+                const cleanedJson = sanitizeJsonString(scriptContent);
+                if (!cleanedJson)
+                    return; // Skip if we couldn't clean it
+                const jsonLd = JSON.parse(cleanedJson);
                 const possibleDate = extractDateFromJsonLd(jsonLd);
                 if (possibleDate) {
                     attempts.push(`JSON-LD date: "${possibleDate}"`);
@@ -898,7 +962,7 @@ function extractDate($) {
                 }
             }
             catch (e) {
-                // Ignore JSON parsing errors
+                // Silently ignore JSON parsing errors
             }
         });
         if (dateStr)
@@ -1107,7 +1171,12 @@ function extractPublication($, url) {
         let publisher = '';
         jsonLdScripts.each((i, el) => {
             try {
-                const jsonLd = JSON.parse($(el).html() || '');
+                // Safely parse the JSON, with error handling
+                const scriptContent = $(el).html() || '';
+                const cleanedJson = sanitizeJsonString(scriptContent);
+                if (!cleanedJson)
+                    return; // Skip if we couldn't clean it
+                const jsonLd = JSON.parse(cleanedJson);
                 const possiblePublisher = extractPublisherFromJsonLd(jsonLd);
                 if (possiblePublisher) {
                     attempts.push(`JSON-LD publisher: "${possiblePublisher}"`);
@@ -1116,7 +1185,7 @@ function extractPublication($, url) {
                 }
             }
             catch (e) {
-                // Ignore JSON parsing errors
+                // Silently ignore JSON parsing errors
             }
         });
         if (publisher)
@@ -1245,6 +1314,42 @@ function extractContent($) {
         }
     }
     return content;
+}
+// Helper function to extract author from JSON-LD
+function extractAuthorFromJsonLd(jsonLd) {
+    // Handle array of JSON-LD objects
+    if (Array.isArray(jsonLd)) {
+        for (const item of jsonLd) {
+            const author = extractAuthorFromJsonLd(item);
+            if (author)
+                return author;
+        }
+        return '';
+    }
+    // Check for author in different formats
+    if (typeof jsonLd?.author === 'string') {
+        return jsonLd.author;
+    }
+    if (jsonLd?.author?.name) {
+        return jsonLd.author.name;
+    }
+    // Handle array of authors
+    if (Array.isArray(jsonLd?.author) && jsonLd.author.length > 0) {
+        if (typeof jsonLd.author[0] === 'string') {
+            return jsonLd.author[0];
+        }
+        if (jsonLd.author[0]?.name) {
+            return jsonLd.author[0].name;
+        }
+    }
+    // Check for creator
+    if (typeof jsonLd?.creator === 'string') {
+        return jsonLd.creator;
+    }
+    if (jsonLd?.creator?.name) {
+        return jsonLd.creator.name;
+    }
+    return '';
 }
 // Start the server without console.log statements that break the protocol
 const start = async () => {
