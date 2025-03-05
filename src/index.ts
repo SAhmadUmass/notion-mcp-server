@@ -921,102 +921,31 @@ async function extractMetadataFromUrl(url: string) {
   return { publication, author, date, content };
 }
 
-// Helper function to extract author
-function extractAuthor($: cheerio.CheerioAPI): string {
-  // Initialize with empty string, not a default value
-  let author = '';
-  
-  // Log extraction attempts for debugging
-  const attempts: string[] = [];
-  
-  // 1. Look for explicit author rel attribute (highest confidence)
-  const relAuthor = $('[rel="author"]').first();
-  if (relAuthor.length) {
-    author = relAuthor.text().trim();
-    attempts.push(`rel="author": "${author}"`);
-    if (author) return author;
-  }
-  
-  // 2. Look for byline classes (high confidence)
-  const bylineSelectors = [
-    '.byline', '.author', '.article-byline', '.c-byline__author',
-    '.post-author', '.writer', '.c-author', '.bh__byline_wrapper',
-    '.article__byline', '[itemprop="author"]', '.author-name',
-    '.ArticleHeader-byline', '.story-meta__authors', '.article-meta__author'
+// Helper function to find the main content area of an article
+function findMainContentArea($: cheerio.CheerioAPI): any {
+  // Common selectors for main content areas in articles
+  const contentSelectors = [
+    'article', 
+    '[itemprop="articleBody"]',
+    '.article-content',
+    '.post-content',
+    '.entry-content',
+    '.story-body',
+    '#article-body',
+    '.content-body',
+    'main',
+    '.main-content'
   ];
   
-  for (const selector of bylineSelectors) {
-    const bylineElement = $(selector).first();
-    if (bylineElement.length) {
-      // First check if there's a name subclass
-      const nameElement = bylineElement.find('.name, .author-name').first();
-      
-      // Use the name subclass if available, otherwise use the byline element itself
-      const text = nameElement.length 
-        ? nameElement.text().trim() 
-        : bylineElement.text().trim();
-      
-      // Cleanup: Remove "By", "By:", "Author:", etc.
-      let cleanText = text.replace(/^(By|Author|Written by|Posted by)(\s*:)?\s+/i, '');
-      
-      // Remove "• date" or "• time ago" patterns that sometimes appear with bylines
-      cleanText = cleanText.replace(/\s+[•·]\s+.*$/, '');
-      
-      attempts.push(`${selector}: "${cleanText}"`);
-      
-      if (cleanText && cleanText.length < 100) {
-        author = cleanText;
-        // Don't return immediately, continue checking other selectors for highest confidence
-        if (cleanText.match(/^[A-Z][a-z]+(\s+[A-Z][a-z]+)+$/)) {
-          // If it looks like a proper name (e.g., "John Smith"), return it
-          return author;
-        }
-      }
+  for (const selector of contentSelectors) {
+    const element = $(selector).first();
+    if (element.length) {
+      return element[0];
     }
   }
   
-  // 3. Check common meta tags (medium confidence)
-  const metaAuthor = $('meta[name="author"]').attr('content') || 
-                    $('meta[property="article:author"]').attr('content') ||
-                    $('meta[property="og:article:author"]').attr('content');
-  
-  if (metaAuthor) {
-    attempts.push(`meta tag: "${metaAuthor}"`);
-    // If we haven't found an author yet or the meta tag looks better
-    if (!author || (metaAuthor.length < author.length && metaAuthor.includes(' '))) {
-      author = metaAuthor;
-    }
-  }
-  
-  // 4. Look for JSON-LD structured data (medium-high confidence)
-  const jsonLdScripts = $('script[type="application/ld+json"]');
-  if (jsonLdScripts.length) {
-    jsonLdScripts.each((i, el) => {
-      try {
-        // Safely parse the JSON, with error handling
-        const scriptContent = $(el).html() || '';
-        // Clean up common issues in JSON-LD that cause parsing errors
-        const cleanedJson = sanitizeJsonString(scriptContent);
-        
-        if (!cleanedJson) return; // Skip if we couldn't clean it
-        
-        const jsonLd = JSON.parse(cleanedJson);
-        // Handle various JSON-LD formats
-        const possibleAuthor = extractAuthorFromJsonLd(jsonLd);
-        if (possibleAuthor) {
-          attempts.push(`JSON-LD: "${possibleAuthor}"`);
-          // If we haven't found an author yet or the JSON-LD one looks better
-          if (!author || (possibleAuthor.length < author.length && possibleAuthor.includes(' '))) {
-            author = possibleAuthor;
-          }
-        }
-      } catch (e) {
-        // Silently ignore JSON parsing errors
-      }
-    });
-  }
-  
-  return author;
+  // If no main content area is found, return null
+  return null;
 }
 
 // Helper function to sanitize JSON strings before parsing
@@ -1070,6 +999,115 @@ function sanitizeJsonString(jsonString: string): string | null {
   }
 }
 
+// Helper function to extract author
+function extractAuthor($: cheerio.CheerioAPI): string {
+  // Initialize with empty string instead of a default value
+  let authorStr = '';
+  
+  // Log extraction attempts for debugging
+  const attempts: string[] = [];
+  
+  // 1. Look for structured data in JSON-LD (highest confidence)
+  const jsonLdScripts = $('script[type="application/ld+json"]');
+  if (jsonLdScripts.length) {
+    jsonLdScripts.each((i, el) => {
+      try {
+        // Safely parse the JSON, with error handling
+        const scriptContent = $(el).html() || '';
+        const cleanedJson = sanitizeJsonString(scriptContent);
+        
+        if (!cleanedJson) return; // Skip if we couldn't clean it
+        
+        const jsonLd = JSON.parse(cleanedJson);
+        const author = extractAuthorFromJsonLd(jsonLd);
+        
+        if (author) {
+          authorStr = author;
+          attempts.push(`Found in JSON-LD: ${author}`);
+          return false; // Break the loop
+        }
+      } catch (e) {
+        // Silent catch - continue to next script
+      }
+    });
+  }
+  
+  if (authorStr) return authorStr;
+
+  // 2. Look for main content area to limit our search scope
+  const mainContent = findMainContentArea($);
+  // Proper typing with 'as'
+  const $scope = mainContent ? $(mainContent) : $('body');
+  
+  // 3. Check for elements with rel="author" within main content first
+  const relAuthor = $scope.find('[rel="author"]').first();
+  if (relAuthor.length) {
+    authorStr = relAuthor.text().trim();
+    attempts.push(`Found rel="author": ${authorStr}`);
+  }
+  
+  if (!authorStr) {
+    // 4. Look for common author/byline classes within main content
+    const authorSelectors = [
+      '.author', '.byline', '.byline-author', '.article-author', 
+      '.post-author', '[itemprop="author"]', '.writer', '.contributor',
+      '.c-byline__author', '.story-meta__authors', '.author-name',
+      '.article__author', '.bio-name', '.writer-name', '.entry-author'
+    ];
+    
+    for (const selector of authorSelectors) {
+      const element = $scope.find(selector).first();
+      if (element.length) {
+        const text = element.text().trim();
+        // Ensure this isn't just "by" or too short to be a real name
+        if (text && text.length > 3 && !/^by\s*$/i.test(text)) {
+          authorStr = text;
+          attempts.push(`Found ${selector}: ${text}`);
+          break;
+        }
+      }
+    }
+  }
+  
+  if (!authorStr) {
+    // 5. Look for "by" pattern in text
+    const byPattern = /(?:by|writer|author|written by)[:\s]+([A-Z][a-z]+\s+[A-Z][a-z]+)/i;
+    const articleText = $scope.text();
+    const byMatch = articleText.match(byPattern);
+    
+    if (byMatch && byMatch[1]) {
+      authorStr = byMatch[1].trim();
+      attempts.push(`Found by-pattern: ${authorStr}`);
+    }
+  }
+  
+  // 6. If we still don't have an author, try with full document scope
+  // This is a fallback but might pick up authors from other articles
+  if (!authorStr) {
+    // Try meta tags last (can sometimes have wrong info)
+    const metaAuthor = $('meta[name="author"]').attr('content') || 
+                      $('meta[property="article:author"]').attr('content') ||
+                      $('meta[property="og:author"]').attr('content');
+    
+    if (metaAuthor) {
+      authorStr = metaAuthor;
+      attempts.push(`Found in meta tags: ${metaAuthor}`);
+    }
+  }
+  
+  // Clean up the result
+  if (authorStr) {
+    // Remove "By" prefix if present
+    authorStr = authorStr.replace(/^(by|written by|author:)\s+/i, '');
+    
+    // Remove any excess whitespace
+    authorStr = authorStr.replace(/\s+/g, ' ').trim();
+  }
+  
+  // console.log(`Author extraction attempts: ${attempts.join(', ')}`);
+  return authorStr;
+}
+
 // Helper function to extract date
 function extractDate($: cheerio.CheerioAPI): string {
   // Initialize with empty string instead of a default value
@@ -1090,98 +1128,134 @@ function extractDate($: cheerio.CheerioAPI): string {
         if (!cleanedJson) return; // Skip if we couldn't clean it
         
         const jsonLd = JSON.parse(cleanedJson);
-        const possibleDate = extractDateFromJsonLd(jsonLd);
-        if (possibleDate) {
-          attempts.push(`JSON-LD date: "${possibleDate}"`);
-          if (isValidDate(possibleDate)) {
-            dateStr = possibleDate;
-            // High confidence, can return early
-            return false; // Break the each loop
-          }
+        const date = extractDateFromJsonLd(jsonLd);
+        
+        if (date) {
+          dateStr = date;
+          attempts.push(`Found in JSON-LD: ${date}`);
+          return false; // Break the loop
         }
       } catch (e) {
-        // Silently ignore JSON parsing errors
+        // Silent catch - continue to next script
       }
     });
-    
-    if (dateStr) return dateStr;
   }
   
-  // 2. Look for meta tags (high confidence)
-  const metaDateSelectors = [
-    'meta[property="article:published_time"]',
-    'meta[name="date"]',
-    'meta[name="DC.date.issued"]',
-    'meta[name="publication_date"]',
-    'meta[name="publish-date"]',
-    'meta[property="og:published_time"]',
-    'meta[itemprop="datePublished"]'
+  if (dateStr) return dateStr;
+  
+  // 2. Find the main content area to limit our search scope
+  const mainContent = findMainContentArea($);
+  // Proper typing with 'as'
+  const $scope = mainContent ? $(mainContent) : $('body');
+  
+  // 3. Look for the author/byline area as dates are often nearby
+  const authorArea = $scope.find('.author, .byline, [rel="author"], .meta, .article-meta, .post-meta').first();
+  const dateArea = authorArea.length ? authorArea.parent() : $scope;
+  
+  // 4. Find published dates near the author/byline area first
+  const timeSelectors = [
+    'time[datetime]', 
+    '[itemprop="datePublished"]',
+    '.published-date',
+    '.publish-date',
+    '.post-date',
+    '.article-date',
+    '.date',
+    '.timestamp'
   ];
   
-  for (const selector of metaDateSelectors) {
-    const metaDate = $(selector).attr('content');
-    if (metaDate) {
-      attempts.push(`${selector}: "${metaDate}"`);
-      if (isValidDate(metaDate)) {
-        return metaDate;
+  for (const selector of timeSelectors) {
+    const element = dateArea.find(selector).first();
+    if (element.length) {
+      // Prioritize datetime attribute if available
+      const datetime = element.attr('datetime') || element.attr('content');
+      if (datetime && isValidDate(datetime)) {
+        dateStr = datetime;
+        attempts.push(`Found near author ${selector} with datetime: ${dateStr}`);
+        break;
       }
-    }
-  }
-  
-  // 3. Look for time elements (medium-high confidence)
-  const timeElements = $('time');
-  if (timeElements.length) {
-    // First check for datetime attribute
-    const timeWithDatetime = timeElements.filter((i, el) => $(el).attr('datetime') !== undefined).first();
-    if (timeWithDatetime.length) {
-      const datetime = timeWithDatetime.attr('datetime');
-      if (datetime) {
-        attempts.push(`time[datetime]: "${datetime}"`);
-        if (isValidDate(datetime)) {
-          return datetime;
-        }
-      }
-    }
-    
-    // Then check for time element content
-    const firstTime = timeElements.first();
-    if (firstTime.length) {
-      const timeText = firstTime.text().trim();
-      attempts.push(`time element: "${timeText}"`);
-      if (timeText && timeText.length < 50) {
-        dateStr = timeText;
-      }
-    }
-  }
-  
-  // 4. Look for date patterns in common elements
-  const dateSelectors = [
-    '.date', '.published', '.post-date', '.article-date',
-    '.publish-date', '.timestamp', '.article__date', '.c-timestamp',
-    '.post__date', '.article-time', '.ArticleHeader-date',
-    '.article-meta__date', '[itemprop="datePublished"]'
-  ];
-  
-  for (const selector of dateSelectors) {
-    const dateElement = $(selector).first();
-    if (dateElement.length) {
-      const text = dateElement.text().trim();
-      attempts.push(`${selector}: "${text}"`);
-      if (text && text.length < 50) {
-        // Try to parse it
+      
+      // Otherwise use the text content
+      const text = element.text().trim();
+      if (text && text.length > 5) {
+        // Try to parse the text as a date
         const parsedDate = parseLooseDate(text);
         if (parsedDate) {
-          return parsedDate;
-        }
-        
-        // Otherwise just use the text
-        if (!dateStr) {
-          dateStr = text;
+          dateStr = parsedDate;
+          attempts.push(`Found near author ${selector} with text: ${text} -> ${dateStr}`);
+          break;
         }
       }
     }
   }
   
+  // 5. If no date found near author, look in the whole scope
+  if (!dateStr) {
+    for (const selector of timeSelectors) {
+      const element = $scope.find(selector).first();
+      if (element.length) {
+        // Prioritize datetime attribute if available
+        const datetime = element.attr('datetime') || element.attr('content');
+        if (datetime && isValidDate(datetime)) {
+          dateStr = datetime;
+          attempts.push(`Found in content ${selector} with datetime: ${dateStr}`);
+          break;
+        }
+        
+        // Otherwise use the text content
+        const text = element.text().trim();
+        if (text && text.length > 5) {
+          // Ignore if it contains "updated" or "modified"
+          if (!/updated|modified/i.test(text)) {
+            const parsedDate = parseLooseDate(text);
+            if (parsedDate) {
+              dateStr = parsedDate;
+              attempts.push(`Found in content ${selector} with text: ${text} -> ${dateStr}`);
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+  
+  // 6. If still no date, check meta tags
+  if (!dateStr) {
+    // Meta tags in order of reliability
+    const metaSelectors = [
+      'meta[property="article:published_time"]',
+      'meta[itemprop="datePublished"]',
+      'meta[name="pubdate"]',
+      'meta[name="publishdate"]',
+      'meta[name="date"]',
+      'meta[property="og:published_time"]'
+    ];
+    
+    for (const selector of metaSelectors) {
+      const element = $(selector);
+      if (element.length) {
+        const content = element.attr('content');
+        if (content && isValidDate(content)) {
+          dateStr = content;
+          attempts.push(`Found in ${selector}: ${content}`);
+          break;
+        }
+      }
+    }
+  }
+  
+  // 7. Last resort: search for date patterns in text near the top of the article
+  if (!dateStr) {
+    // Get the first few paragraphs of text
+    const topText = $scope.find('p').slice(0, 3).text();
+    const parsedDate = parseLooseDate(topText);
+    if (parsedDate) {
+      dateStr = parsedDate;
+      attempts.push(`Found date pattern in top paragraphs: ${dateStr}`);
+    }
+  }
+  
+  // console.log(`Date extraction attempts: ${attempts.join(', ')}`);
   return dateStr;
 }
 
