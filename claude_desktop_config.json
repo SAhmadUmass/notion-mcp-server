@@ -3,8 +3,8 @@
     "notion": {
       "command": "node",
       "args": [
-        "/Users/shaheerahmad/Documents/notion-mcp-server/dist/index.js",
-        "--notion-api-key=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"
+        "/Users/zahad/Documents/GitHub/notion-mcp-server/dist/index.js",
+        "--notion-api-key=${NOTION_API_KEY}"
       ]
     }
   }
