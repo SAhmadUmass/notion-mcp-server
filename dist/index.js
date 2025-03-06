@@ -1071,6 +1071,28 @@ function extractAuthor($) {
     // Check for site-specific extractors first
     const hostname = getHostnameFromHtml($);
     if (hostname) {
+        // AP News specific extraction
+        if (hostname.includes('apnews.com')) {
+            attempts.push(`Using AP News-specific extractor`);
+            const authors = $('.Page-authors');
+            if (authors.length) {
+                // Find all author links within the container
+                const authorLinks = authors.find('a');
+                if (authorLinks.length) {
+                    const authorNames = [];
+                    authorLinks.each((i, el) => {
+                        const name = $(el).text().trim();
+                        if (name)
+                            authorNames.push(name);
+                    });
+                    if (authorNames.length) {
+                        authorStr = authorNames.join(', ');
+                        attempts.push(`AP News byline found: ${authorStr}`);
+                        return authorStr;
+                    }
+                }
+            }
+        }
         // New York Times specific extraction
         if (hostname.includes('nytimes.com')) {
             attempts.push(`Using NYT-specific extractor`);
@@ -1090,6 +1112,50 @@ function extractAuthor($) {
             }
             // If found through site-specific extractor and passes validation, return early
             if (authorStr && validateExtractedAuthor(authorStr, rawHtml)) {
+                return authorStr;
+            }
+        }
+    }
+    // Look for common author container patterns first
+    // This handles multiple authors in various structures
+    const authorContainerSelectors = [
+        '.author-container', '.byline-container', '.article-authors',
+        '.byline-wrapper', '.authors-container', '.authors-list',
+        '.author-byline', '.meta-authors', '.page-authors',
+        '.article__byline', '.c-byline', '.article-byline',
+        '[data-testid="byline"]', '[data-component="byline"]',
+        '.story-meta-authors', '.story-header__authors'
+    ];
+    for (const containerSelector of authorContainerSelectors) {
+        const container = $(containerSelector);
+        if (container.length) {
+            attempts.push(`Found author container: ${containerSelector}`);
+            // Check for author links within the container
+            const authorLinks = container.find('a[href*="author"], a[rel="author"], a.author-link, a.writer-link');
+            if (authorLinks.length) {
+                const authorNames = [];
+                authorLinks.each((i, el) => {
+                    const name = $(el).text().trim();
+                    if (name && name.length > 2)
+                        authorNames.push(name);
+                });
+                if (authorNames.length) {
+                    authorStr = authorNames.join(', ');
+                    attempts.push(`Found multiple authors in links: ${authorStr}`);
+                    if (validateExtractedAuthor(authorStr, rawHtml)) {
+                        return authorStr;
+                    }
+                }
+            }
+            // If no links found or validation failed, try container text
+            const containerText = container.text().trim()
+                .replace(/^by\s+|^byline:\s+|^author[s]?:\s+/i, '')
+                .replace(/\s+and\s+/g, ', ')
+                .replace(/\s*,\s*/g, ', ')
+                .trim();
+            if (containerText && validateExtractedAuthor(containerText, rawHtml)) {
+                authorStr = containerText;
+                attempts.push(`Found authors from container text: ${authorStr}`);
                 return authorStr;
             }
         }
@@ -1123,9 +1189,63 @@ function extractAuthor($) {
     const mainContent = findMainContentArea($);
     // Proper typing with 'as'
     const $scope = mainContent ? $(mainContent) : $('body');
-    // 3. Check for elements with rel="author" within main content first
-    const relAuthor = $scope.find('[rel="author"]').first();
-    if (relAuthor.length) {
+    // 3. Check for explicit multiple author patterns
+    const multiAuthorPatterns = [
+        // Look for containers with multiple links
+        {
+            container: '.byline, .author, [itemprop="author"], .meta-authors',
+            elements: 'a'
+        },
+        // Look for specific author list patterns
+        {
+            container: '.authors-list, .article-authors, .byline-authors, .writer-names',
+            elements: 'li, span.author, span.writer, div.author-name'
+        }
+    ];
+    for (const pattern of multiAuthorPatterns) {
+        const container = $scope.find(pattern.container);
+        if (container.length) {
+            const elements = container.find(pattern.elements);
+            if (elements.length > 1) {
+                // We found multiple elements that might be authors
+                const authorNames = [];
+                elements.each((i, el) => {
+                    const text = $(el).text().trim()
+                        .replace(/^by\s+|^and\s+|^,\s*/i, '')
+                        .trim();
+                    if (text && text.length > 2 && !/^(by|and|,)$/i.test(text)) {
+                        authorNames.push(text);
+                    }
+                });
+                if (authorNames.length > 0) {
+                    authorStr = authorNames.join(', ');
+                    attempts.push(`Found multiple authors: ${authorStr}`);
+                    if (validateExtractedAuthor(authorStr, rawHtml)) {
+                        return authorStr;
+                    }
+                }
+            }
+        }
+    }
+    // 4. Check for elements with rel="author" within main content first
+    const relAuthor = $scope.find('[rel="author"]');
+    if (relAuthor.length > 1) {
+        // Multiple authors with rel="author"
+        const authorNames = [];
+        relAuthor.each((i, el) => {
+            const text = $(el).text().trim();
+            if (text)
+                authorNames.push(text);
+        });
+        if (authorNames.length > 0) {
+            authorStr = authorNames.join(', ');
+            attempts.push(`Found multiple rel="author": ${authorStr}`);
+            if (validateExtractedAuthor(authorStr, rawHtml)) {
+                return authorStr;
+            }
+        }
+    }
+    else if (relAuthor.length === 1) {
         const text = relAuthor.text().trim();
         if (validateExtractedAuthor(text, rawHtml)) {
             authorStr = text;
@@ -1133,7 +1253,7 @@ function extractAuthor($) {
         }
     }
     if (!authorStr) {
-        // 4. Look for common author/byline classes within main content
+        // 5. Look for common author/byline classes within main content
         const authorSelectors = [
             '.author', '.byline', '.byline-author', '.article-author',
             '.post-author', '[itemprop="author"]', '.writer', '.contributor',
@@ -1146,9 +1266,15 @@ function extractAuthor($) {
                 const text = element.text().trim();
                 // Ensure this isn't just "by" or too short to be a real name
                 if (text && text.length > 3 && !/^by\s*$/i.test(text)) {
-                    if (validateExtractedAuthor(text, rawHtml)) {
-                        authorStr = text;
-                        attempts.push(`Found ${selector}: ${text}`);
+                    // Process for multiple authors
+                    const processedText = text
+                        .replace(/^by\s+|^byline:\s+|^author[s]?:\s+/i, '')
+                        .replace(/\s+and\s+/g, ', ')
+                        .replace(/\s*,\s*/g, ', ')
+                        .trim();
+                    if (validateExtractedAuthor(processedText, rawHtml)) {
+                        authorStr = processedText;
+                        attempts.push(`Found ${selector}: ${processedText}`);
                         break;
                     }
                 }
@@ -1156,19 +1282,20 @@ function extractAuthor($) {
         }
     }
     if (!authorStr) {
-        // 5. Look for "by" pattern in text
-        const byPattern = /(?:by|writer|author|written by)[:\s]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)/i;
+        // 6. Look for "by" pattern in text
+        const byPattern = /(?:by|writer|author|written by)[:\s]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+(?:\s+and\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)*)/i;
         const articleText = $scope.text();
         const byMatch = articleText.match(byPattern);
         if (byMatch && byMatch[1]) {
-            const text = byMatch[1].trim();
+            const text = byMatch[1].trim()
+                .replace(/\s+and\s+/g, ', ');
             if (validateExtractedAuthor(text, rawHtml)) {
                 authorStr = text;
                 attempts.push(`Found by-pattern: ${authorStr}`);
             }
         }
     }
-    // 6. If we still don't have an author, try with meta tags (lower confidence)
+    // 7. If we still don't have an author, try with meta tags (lower confidence)
     if (!authorStr) {
         // Try meta tags last (can sometimes have wrong info)
         const metaAuthor = $('meta[name="author"]').attr('content') ||
@@ -1193,12 +1320,60 @@ function extractAuthor($) {
 function validateExtractedAuthor(author, rawHtml) {
     if (!author || author.length < 4)
         return false;
+    // Check if this looks like a list of authors
+    const isMultipleAuthors = author.includes(',') || author.includes(' and ');
     // Clean up the author string for validation
     const cleanAuthor = author
         .replace(/^by\s+/i, '') // Remove "By" prefix
         .replace(/\s+/g, ' ') // Normalize spaces
         .trim()
         .toLowerCase();
+    // Handle multiple authors case
+    if (isMultipleAuthors) {
+        // Split by commas and " and "
+        const authorList = cleanAuthor.split(/,\s*|\s+and\s+/);
+        let validAuthorsCount = 0;
+        for (const singleAuthor of authorList) {
+            if (singleAuthor.length < 4)
+                continue; // Skip very short segments
+            // For each author, check if it appears in the HTML
+            if (singleAuthor.includes(' ')) {
+                // Author with first and last name
+                const nameParts = singleAuthor.split(' ');
+                // For short first/last names, require both parts to be present
+                if (nameParts.length === 2 &&
+                    nameParts[0].length <= 3 &&
+                    nameParts[1].length <= 3) {
+                    const combinedPattern = nameParts.join('\\s+');
+                    if (new RegExp(combinedPattern, 'i').test(rawHtml)) {
+                        validAuthorsCount++;
+                        continue;
+                    }
+                }
+                // Count how many significant parts are found
+                let foundPartsCount = 0;
+                for (const part of nameParts) {
+                    if (part.length >= 4 && rawHtml.includes(part)) {
+                        foundPartsCount++;
+                    }
+                }
+                // Consider valid if at least half of significant parts are found
+                const significantParts = nameParts.filter(part => part.length >= 4).length;
+                if (significantParts > 0 && foundPartsCount >= Math.ceil(significantParts * 0.5)) {
+                    validAuthorsCount++;
+                }
+            }
+            else {
+                // Single name author (rare but possible)
+                if (singleAuthor.length >= 5 && rawHtml.includes(singleAuthor)) {
+                    validAuthorsCount++;
+                }
+            }
+        }
+        // Consider the author list valid if at least half the authors were found
+        return validAuthorsCount >= Math.ceil(authorList.length * 0.5);
+    }
+    // Single author case - same logic as before
     // Names are usually at least two words
     if (!cleanAuthor.includes(' '))
         return false;
