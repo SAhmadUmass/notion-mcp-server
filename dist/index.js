@@ -649,6 +649,193 @@ server.tool("extract-url-metadata", {
         };
     }
 });
+// Tool: Add an article to a database
+server.tool("add-article", {
+    url: z.string().url(),
+    databaseId: z.string(),
+    generateSummary: z.boolean().default(true)
+}, async ({ url, databaseId, generateSummary }) => {
+    try {
+        // First retrieve database to get property types
+        const databaseInfo = await notion.databases.retrieve({
+            database_id: databaseId
+        });
+        // Get all available property types
+        const propertyInfoMap = databaseInfo.properties || {};
+        // Auto-detect property names
+        const urlPropertyName = findMatchingProperty(propertyInfoMap, [
+            "URL", "Link", "Website", "Address", "Source Link"
+        ]);
+        const titlePropertyName = findMatchingProperty(propertyInfoMap, [
+            "Title", "Name", "Article Title", "Headline", "Topic"
+        ]);
+        const publicationPropertyName = findMatchingProperty(propertyInfoMap, [
+            "Publication", "Publisher", "Source", "Site", "Website Name", "Origin"
+        ]);
+        const authorPropertyName = findMatchingProperty(propertyInfoMap, [
+            "Author", "Author(s)", "Writer", "Creator", "By"
+        ]);
+        const datePropertyName = findMatchingProperty(propertyInfoMap, [
+            "Date", "Published", "Published Date", "Publish Date", "Release Date", "Post Date"
+        ]);
+        const summaryPropertyName = findMatchingProperty(propertyInfoMap, [
+            "Summary", "Article Summary", "TLDR", "Description", "Brief"
+        ]);
+        // Get property types for the detected properties
+        const titlePropertyType = getPropertyType(propertyInfoMap, titlePropertyName);
+        const publicationPropertyType = getPropertyType(propertyInfoMap, publicationPropertyName);
+        const authorPropertyType = getPropertyType(propertyInfoMap, authorPropertyName);
+        const datePropertyType = getPropertyType(propertyInfoMap, datePropertyName);
+        const summaryPropertyType = getPropertyType(propertyInfoMap, summaryPropertyName);
+        const urlPropertyType = getPropertyType(propertyInfoMap, urlPropertyName);
+        // Log the detected fields
+        console.log(`Using field mapping:
+- Title: "${titlePropertyName}" (${titlePropertyType})
+- URL: "${urlPropertyName}" (${urlPropertyType})
+- Publication: "${publicationPropertyName}" (${publicationPropertyType})
+- Author: "${authorPropertyName}" (${authorPropertyType})
+- Date: "${datePropertyName}" (${datePropertyType})
+- Summary: "${summaryPropertyName}" (${summaryPropertyType})`);
+        // Extract metadata from the URL
+        const metadata = await extractMetadataFromUrl(url);
+        const { publication, author, date, content } = metadata;
+        // Use the URL's title or domain as the article title if not extracted
+        let title = "";
+        // Try to extract title from HTML
+        try {
+            const response = await axios.get(url, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                },
+                timeout: 10000,
+                maxRedirects: 5
+            });
+            const $ = cheerio.load(response.data);
+            title = $('title').text().trim() ||
+                $('meta[property="og:title"]').attr('content') ||
+                $('meta[name="twitter:title"]').attr('content') ||
+                new URL(url).hostname;
+        }
+        catch (error) {
+            // If we can't access the URL, use the domain as title
+            try {
+                title = new URL(url).hostname;
+            }
+            catch (e) {
+                title = url;
+            }
+        }
+        // Generate summary if needed
+        let summary = "";
+        if (generateSummary && content) {
+            // For now, use a simple summarization method
+            summary = createSimpleSummary(content);
+        }
+        // Create the page properties
+        const properties = {};
+        // Set the title property
+        if (titlePropertyName && titlePropertyType) {
+            if (titlePropertyType === 'title') {
+                properties[titlePropertyName] = createTitleProperty(title);
+            }
+            else if (titlePropertyType === 'rich_text') {
+                properties[titlePropertyName] = createRichTextProperty(title);
+            }
+        }
+        // Set the URL property
+        if (urlPropertyName && urlPropertyType) {
+            if (urlPropertyType === 'url') {
+                properties[urlPropertyName] = { url };
+            }
+            else if (urlPropertyType === 'rich_text') {
+                properties[urlPropertyName] = createRichTextProperty(url);
+            }
+        }
+        // Set the publication property
+        if (publicationPropertyName && publicationPropertyType && publication) {
+            if (publicationPropertyType === 'select') {
+                properties[publicationPropertyName] = createSelectProperty(publication);
+            }
+            else if (publicationPropertyType === 'rich_text') {
+                properties[publicationPropertyName] = createRichTextProperty(publication);
+            }
+            else if (publicationPropertyType === 'title') {
+                properties[publicationPropertyName] = createTitleProperty(publication);
+            }
+        }
+        // Set the author property
+        if (authorPropertyName && authorPropertyType && author) {
+            if (authorPropertyType === 'multi_select') {
+                properties[authorPropertyName] = createMultiSelectProperty(parseAuthors(author));
+            }
+            else if (authorPropertyType === 'select') {
+                properties[authorPropertyName] = createSelectProperty(author);
+            }
+            else if (authorPropertyType === 'rich_text') {
+                properties[authorPropertyName] = createRichTextProperty(author);
+            }
+        }
+        // Set the date property
+        if (datePropertyName && datePropertyType === 'date' && date) {
+            properties[datePropertyName] = createDateProperty(date);
+        }
+        // Set the summary property
+        if (summaryPropertyName && summaryPropertyType && summary) {
+            if (summaryPropertyType === 'rich_text') {
+                properties[summaryPropertyName] = createRichTextProperty(summary);
+            }
+            else if (summaryPropertyType === 'select') {
+                properties[summaryPropertyName] = createSelectProperty(summary);
+            }
+            else if (summaryPropertyType === 'multi_select') {
+                properties[summaryPropertyName] = createMultiSelectProperty([summary]);
+            }
+        }
+        // Create the page in Notion
+        const response = await notion.pages.create({
+            parent: {
+                database_id: databaseId
+            },
+            properties: properties
+        });
+        // Add content blocks if we have content
+        if (content && response.id) {
+            try {
+                // Create content blocks (paragraphs)
+                const contentBlocks = createContentBlocks(content);
+                await notion.blocks.children.append({
+                    block_id: response.id,
+                    children: contentBlocks
+                });
+            }
+            catch (err) {
+                console.error(`Error updating content: ${err.message}`);
+            }
+        }
+        // Return success with extracted fields
+        return {
+            content: [{
+                    type: "text",
+                    text: `✅ Article added to your database!\n\n` +
+                        `🔗 URL: ${url}\n` +
+                        `📝 Title: ${title}\n` +
+                        (publication ? `📰 Publication: ${publication}\n` : '') +
+                        (author ? `✍️ Author: ${author}\n` : '') +
+                        (date ? `📅 Date: ${date}\n` : '') +
+                        (summary ? `\n📌 Summary: ${summary}` : '')
+                }]
+        };
+    }
+    catch (error) {
+        return {
+            content: [{
+                    type: "text",
+                    text: `Error adding article: ${error.message}`
+                }],
+            isError: true
+        };
+    }
+});
 // Helper function to find a matching property from available properties
 function findMatchingProperty(propertyInfoMap, possibleNames) {
     const availableProperties = Object.keys(propertyInfoMap);
@@ -879,6 +1066,34 @@ function extractAuthor($) {
     let authorStr = '';
     // Log extraction attempts for debugging
     const attempts = [];
+    // Get the raw HTML once for validation later
+    const rawHtml = $.html().toLowerCase();
+    // Check for site-specific extractors first
+    const hostname = getHostnameFromHtml($);
+    if (hostname) {
+        // New York Times specific extraction
+        if (hostname.includes('nytimes.com')) {
+            attempts.push(`Using NYT-specific extractor`);
+            // NYT typically has bylines with specific structure
+            const nytByline = $('.byline-author, .last-byline, .css-1baulvz');
+            if (nytByline.length) {
+                authorStr = nytByline.first().text().trim();
+                attempts.push(`NYT byline found: ${authorStr}`);
+            }
+            // Check for author in meta tags (NYT usually has this)
+            if (!authorStr) {
+                const metaAuthor = $('meta[name="byl"]').attr('content');
+                if (metaAuthor) {
+                    authorStr = metaAuthor.replace(/^by\s+/i, '').trim();
+                    attempts.push(`NYT meta byl tag: ${authorStr}`);
+                }
+            }
+            // If found through site-specific extractor and passes validation, return early
+            if (authorStr && validateExtractedAuthor(authorStr, rawHtml)) {
+                return authorStr;
+            }
+        }
+    }
     // 1. Look for structured data in JSON-LD (highest confidence)
     const jsonLdScripts = $('script[type="application/ld+json"]');
     if (jsonLdScripts.length) {
@@ -891,7 +1106,7 @@ function extractAuthor($) {
                     return; // Skip if we couldn't clean it
                 const jsonLd = JSON.parse(cleanedJson);
                 const author = extractAuthorFromJsonLd(jsonLd);
-                if (author) {
+                if (author && validateExtractedAuthor(author, rawHtml)) {
                     authorStr = author;
                     attempts.push(`Found in JSON-LD: ${author}`);
                     return false; // Break the loop
@@ -911,8 +1126,11 @@ function extractAuthor($) {
     // 3. Check for elements with rel="author" within main content first
     const relAuthor = $scope.find('[rel="author"]').first();
     if (relAuthor.length) {
-        authorStr = relAuthor.text().trim();
-        attempts.push(`Found rel="author": ${authorStr}`);
+        const text = relAuthor.text().trim();
+        if (validateExtractedAuthor(text, rawHtml)) {
+            authorStr = text;
+            attempts.push(`Found rel="author": ${authorStr}`);
+        }
     }
     if (!authorStr) {
         // 4. Look for common author/byline classes within main content
@@ -928,31 +1146,35 @@ function extractAuthor($) {
                 const text = element.text().trim();
                 // Ensure this isn't just "by" or too short to be a real name
                 if (text && text.length > 3 && !/^by\s*$/i.test(text)) {
-                    authorStr = text;
-                    attempts.push(`Found ${selector}: ${text}`);
-                    break;
+                    if (validateExtractedAuthor(text, rawHtml)) {
+                        authorStr = text;
+                        attempts.push(`Found ${selector}: ${text}`);
+                        break;
+                    }
                 }
             }
         }
     }
     if (!authorStr) {
         // 5. Look for "by" pattern in text
-        const byPattern = /(?:by|writer|author|written by)[:\s]+([A-Z][a-z]+\s+[A-Z][a-z]+)/i;
+        const byPattern = /(?:by|writer|author|written by)[:\s]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)/i;
         const articleText = $scope.text();
         const byMatch = articleText.match(byPattern);
         if (byMatch && byMatch[1]) {
-            authorStr = byMatch[1].trim();
-            attempts.push(`Found by-pattern: ${authorStr}`);
+            const text = byMatch[1].trim();
+            if (validateExtractedAuthor(text, rawHtml)) {
+                authorStr = text;
+                attempts.push(`Found by-pattern: ${authorStr}`);
+            }
         }
     }
-    // 6. If we still don't have an author, try with full document scope
-    // This is a fallback but might pick up authors from other articles
+    // 6. If we still don't have an author, try with meta tags (lower confidence)
     if (!authorStr) {
         // Try meta tags last (can sometimes have wrong info)
         const metaAuthor = $('meta[name="author"]').attr('content') ||
             $('meta[property="article:author"]').attr('content') ||
             $('meta[property="og:author"]').attr('content');
-        if (metaAuthor) {
+        if (metaAuthor && validateExtractedAuthor(metaAuthor, rawHtml)) {
             authorStr = metaAuthor;
             attempts.push(`Found in meta tags: ${metaAuthor}`);
         }
@@ -966,6 +1188,68 @@ function extractAuthor($) {
     }
     // console.log(`Author extraction attempts: ${attempts.join(', ')}`);
     return authorStr;
+}
+// Helper function to validate that an extracted author actually exists in the HTML
+function validateExtractedAuthor(author, rawHtml) {
+    if (!author || author.length < 4)
+        return false;
+    // Clean up the author string for validation
+    const cleanAuthor = author
+        .replace(/^by\s+/i, '') // Remove "By" prefix
+        .replace(/\s+/g, ' ') // Normalize spaces
+        .trim()
+        .toLowerCase();
+    // Names are usually at least two words
+    if (!cleanAuthor.includes(' '))
+        return false;
+    // Check for presence in raw HTML
+    // Split the author into parts to handle different formatting
+    const nameParts = cleanAuthor.split(' ');
+    // For short first/last names, require both parts to be present
+    if (nameParts.length === 2 &&
+        nameParts[0].length <= 3 &&
+        nameParts[1].length <= 3) {
+        const combinedPattern = nameParts.join('\\s+');
+        return new RegExp(combinedPattern, 'i').test(rawHtml);
+    }
+    // For longer names, check if they appear near each other
+    let foundCount = 0;
+    for (const part of nameParts) {
+        // Only validate parts that are at least 4 characters to avoid false positives
+        if (part.length >= 4) {
+            if (rawHtml.includes(part)) {
+                foundCount++;
+            }
+        }
+    }
+    // Require at least 50% of the significant name parts to be found
+    const significantParts = nameParts.filter(part => part.length >= 4).length;
+    return significantParts > 0 && foundCount >= Math.ceil(significantParts * 0.5);
+}
+// Helper function to extract hostname from HTML
+function getHostnameFromHtml($) {
+    // Try to get the hostname from canonical link
+    const canonical = $('link[rel="canonical"]').attr('href');
+    if (canonical) {
+        try {
+            return new URL(canonical).hostname;
+        }
+        catch (e) {
+            // Invalid URL, continue
+        }
+    }
+    // Try to get from og:url
+    const ogUrl = $('meta[property="og:url"]').attr('content');
+    if (ogUrl) {
+        try {
+            return new URL(ogUrl).hostname;
+        }
+        catch (e) {
+            // Invalid URL, continue
+        }
+    }
+    // No hostname found
+    return '';
 }
 // Helper function to extract date
 function extractDate($) {

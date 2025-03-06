@@ -742,6 +742,211 @@ server.tool(
   }
 );
 
+// Tool: Add an article to a database
+server.tool(
+  "add-article",
+  { 
+    url: z.string().url(),
+    databaseId: z.string(),
+    generateSummary: z.boolean().default(true)
+  },
+  async ({ url, databaseId, generateSummary }) => {
+    try {
+      // First retrieve database to get property types
+      const databaseInfo = await notion.databases.retrieve({
+        database_id: databaseId
+      });
+      
+      // Get all available property types
+      const propertyInfoMap = databaseInfo.properties || {};
+      
+      // Auto-detect property names
+      const urlPropertyName = findMatchingProperty(propertyInfoMap, [
+        "URL", "Link", "Website", "Address", "Source Link"
+      ]);
+      
+      const titlePropertyName = findMatchingProperty(propertyInfoMap, [
+        "Title", "Name", "Article Title", "Headline", "Topic"
+      ]);
+      
+      const publicationPropertyName = findMatchingProperty(propertyInfoMap, [
+        "Publication", "Publisher", "Source", "Site", "Website Name", "Origin"
+      ]);
+      
+      const authorPropertyName = findMatchingProperty(propertyInfoMap, [
+        "Author", "Author(s)", "Writer", "Creator", "By"
+      ]);
+      
+      const datePropertyName = findMatchingProperty(propertyInfoMap, [
+        "Date", "Published", "Published Date", "Publish Date", "Release Date", "Post Date"
+      ]);
+      
+      const summaryPropertyName = findMatchingProperty(propertyInfoMap, [
+        "Summary", "Article Summary", "TLDR", "Description", "Brief"
+      ]);
+      
+      // Get property types for the detected properties
+      const titlePropertyType = getPropertyType(propertyInfoMap, titlePropertyName);
+      const publicationPropertyType = getPropertyType(propertyInfoMap, publicationPropertyName);
+      const authorPropertyType = getPropertyType(propertyInfoMap, authorPropertyName);
+      const datePropertyType = getPropertyType(propertyInfoMap, datePropertyName);
+      const summaryPropertyType = getPropertyType(propertyInfoMap, summaryPropertyName);
+      const urlPropertyType = getPropertyType(propertyInfoMap, urlPropertyName);
+      
+      // Log the detected fields
+      console.log(`Using field mapping:
+- Title: "${titlePropertyName}" (${titlePropertyType})
+- URL: "${urlPropertyName}" (${urlPropertyType})
+- Publication: "${publicationPropertyName}" (${publicationPropertyType})
+- Author: "${authorPropertyName}" (${authorPropertyType})
+- Date: "${datePropertyName}" (${datePropertyType})
+- Summary: "${summaryPropertyName}" (${summaryPropertyType})`);
+      
+      // Extract metadata from the URL
+      const metadata = await extractMetadataFromUrl(url);
+      const { publication, author, date, content } = metadata;
+      
+      // Use the URL's title or domain as the article title if not extracted
+      let title = "";
+      
+      // Try to extract title from HTML
+      try {
+        const response = await axios.get(url, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+          },
+          timeout: 10000,
+          maxRedirects: 5
+        });
+        
+        const $ = cheerio.load(response.data);
+        title = $('title').text().trim() || 
+                $('meta[property="og:title"]').attr('content') || 
+                $('meta[name="twitter:title"]').attr('content') || 
+                new URL(url).hostname;
+      } catch (error) {
+        // If we can't access the URL, use the domain as title
+        try {
+          title = new URL(url).hostname;
+        } catch (e) {
+          title = url;
+        }
+      }
+      
+      // Generate summary if needed
+      let summary = "";
+      if (generateSummary && content) {
+        // For now, use a simple summarization method
+        summary = createSimpleSummary(content);
+      }
+      
+      // Create the page properties
+      const properties: any = {};
+      
+      // Set the title property
+      if (titlePropertyName && titlePropertyType) {
+        if (titlePropertyType === 'title') {
+          properties[titlePropertyName] = createTitleProperty(title);
+        } else if (titlePropertyType === 'rich_text') {
+          properties[titlePropertyName] = createRichTextProperty(title);
+        }
+      }
+      
+      // Set the URL property
+      if (urlPropertyName && urlPropertyType) {
+        if (urlPropertyType === 'url') {
+          properties[urlPropertyName] = { url };
+        } else if (urlPropertyType === 'rich_text') {
+          properties[urlPropertyName] = createRichTextProperty(url);
+        }
+      }
+      
+      // Set the publication property
+      if (publicationPropertyName && publicationPropertyType && publication) {
+        if (publicationPropertyType === 'select') {
+          properties[publicationPropertyName] = createSelectProperty(publication);
+        } else if (publicationPropertyType === 'rich_text') {
+          properties[publicationPropertyName] = createRichTextProperty(publication);
+        } else if (publicationPropertyType === 'title') {
+          properties[publicationPropertyName] = createTitleProperty(publication);
+        }
+      }
+      
+      // Set the author property
+      if (authorPropertyName && authorPropertyType && author) {
+        if (authorPropertyType === 'multi_select') {
+          properties[authorPropertyName] = createMultiSelectProperty(parseAuthors(author));
+        } else if (authorPropertyType === 'select') {
+          properties[authorPropertyName] = createSelectProperty(author);
+        } else if (authorPropertyType === 'rich_text') {
+          properties[authorPropertyName] = createRichTextProperty(author);
+        }
+      }
+      
+      // Set the date property
+      if (datePropertyName && datePropertyType === 'date' && date) {
+        properties[datePropertyName] = createDateProperty(date);
+      }
+      
+      // Set the summary property
+      if (summaryPropertyName && summaryPropertyType && summary) {
+        if (summaryPropertyType === 'rich_text') {
+          properties[summaryPropertyName] = createRichTextProperty(summary);
+        } else if (summaryPropertyType === 'select') {
+          properties[summaryPropertyName] = createSelectProperty(summary);
+        } else if (summaryPropertyType === 'multi_select') {
+          properties[summaryPropertyName] = createMultiSelectProperty([summary]);
+        }
+      }
+      
+      // Create the page in Notion
+      const response = await notion.pages.create({
+        parent: {
+          database_id: databaseId
+        },
+        properties: properties
+      });
+      
+      // Add content blocks if we have content
+      if (content && response.id) {
+        try {
+          // Create content blocks (paragraphs)
+          const contentBlocks = createContentBlocks(content);
+          
+          await notion.blocks.children.append({
+            block_id: response.id,
+            children: contentBlocks
+          });
+        } catch (err: any) {
+          console.error(`Error updating content: ${err.message}`);
+        }
+      }
+      
+      // Return success with extracted fields
+      return {
+        content: [{
+          type: "text",
+          text: `✅ Article added to your database!\n\n` +
+                `🔗 URL: ${url}\n` +
+                `📝 Title: ${title}\n` +
+                (publication ? `📰 Publication: ${publication}\n` : '') +
+                (author ? `✍️ Author: ${author}\n` : '') +
+                (date ? `📅 Date: ${date}\n` : '') +
+                (summary ? `\n📌 Summary: ${summary}` : '')
+        }]
+      };
+    } catch (error: any) {
+      return {
+        content: [{
+          type: "text",
+          text: `Error adding article: ${error.message}`
+        }],
+        isError: true
+      };
+    }
+  }
+);
+
 // Helper function to find a matching property from available properties
 function findMatchingProperty(propertyInfoMap: any, possibleNames: string[]): string {
   const availableProperties = Object.keys(propertyInfoMap);
